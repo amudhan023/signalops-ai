@@ -3,6 +3,20 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Compose reads .env for every image tag and the Postgres password. Without it
+# each ${VAR} expands to an empty string and the failure is confusing, so stop
+# here instead. .env is gitignored -- a fresh clone will not have one.
+if [ ! -f .env ]; then
+  echo "Missing $PWD/.env" >&2
+  echo >&2
+  echo "It is gitignored because it holds POSTGRES_PASSWORD. Create it from the" >&2
+  echo "template, then set a password of your own:" >&2
+  echo >&2
+  echo "  cp $PWD/.env.example $PWD/.env" >&2
+  echo >&2
+  exit 1
+fi
+
 # OpenSearch refuses to start below this. Persist it so reboots keep working.
 NEEDED=262144
 CURRENT=$(sysctl -n vm.max_map_count 2>/dev/null || echo 0)
