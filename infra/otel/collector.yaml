@@ -1,0 +1,44 @@
+# Your simulator and app send OTLP here. This forwards logs and traces
+# into OpenSearch as plain documents — no Data Prepper, no data streams.
+# The agent's MCP tools query those indices directly.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  opensearch:
+    http:
+      endpoint: http://opensearch:9200
+      tls:
+        insecure: true
+    logs_index: sre-logs
+    traces_index: sre-traces
+
+  # Uncomment to see what is actually arriving.
+  # debug:
+  #   verbosity: basic
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [opensearch]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [opensearch]

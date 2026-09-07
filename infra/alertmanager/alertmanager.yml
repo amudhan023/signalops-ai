@@ -1,0 +1,21 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  # The key design decision from deep dive 01.
+  # Grouping by alertname would keep latency and error-rate alerts separate.
+  # Grouping by tenant + service makes several symptoms of one service failure
+  # arrive as a single incident notification.
+  group_by: ["tenant", "service"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: sre-copilot
+
+receivers:
+  - name: sre-copilot
+    webhook_configs:
+      # Your receiver, on the host. Keep it small: verify sender,
+      # resolve tenant + service, write to Kafka.
+      - url: http://host.docker.internal:8080/alerts
+        send_resolved: true

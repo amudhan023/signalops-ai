@@ -1,0 +1,30 @@
+groups:
+  - name: payment-api
+    rules:
+      # Fires the walkthrough incident: p99 crosses 4s against an ~80ms baseline.
+      # Threshold is 1s so it trips well before the full 4s, as a real rule would.
+      - alert: PaymentAPIHighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, tenant, service) (
+              rate(payment_api_request_duration_seconds_bucket[5m])
+            )
+          ) > 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "p99 latency on {{ $labels.service }} is {{ $value | humanizeDuration }}"
+
+      # A second rule on the same service, so you can prove the grouping key
+      # collapses several symptoms into one incident notification.
+      - alert: PaymentAPIDatabaseErrors
+        expr: |
+          sum by (tenant, service) (
+            rate(payment_api_database_errors_total[5m])
+          ) > 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} database errors: {{ $value }}/s"
