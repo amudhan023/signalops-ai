@@ -51,17 +51,19 @@ Infrastructure up. Connect your apps to:
 
   Prometheus        http://localhost:9090
   Alertmanager      http://localhost:9093    -> POSTs to host :8080/alerts
-  Grafana           http://localhost:3000    (anonymous admin)
+  Grafana           http://localhost:3000    (anonymous admin) dashboard: SignalOps folder
   OpenSearch        http://localhost:9200    indices: sre-logs, sre-traces
   OTLP gRPC         localhost:4317           send logs + traces here
   OTLP HTTP         localhost:4318
-  Kafka             localhost:29092          topic: incidents (3 partitions)
+  Kafka             localhost:29092          topics: incidents (3 partitions),
+                                             payment-events (6 partitions, 5 min retention)
   Redis             localhost:6379
   Postgres          localhost:5432           srecopilot/srecopilot
 
-Still yours to build and run on the host:
-  simulator (:8000, must export tenant+service labels), receiver (:8080),
-  agent worker, MCP servers.
+Host processes (start them all with ../dev.sh up, or one at a time):
+  simulator  ../simulator/run.sh   :8000  streams to payment-events
+  receiver   ../receiver/run.sh    :8080  files alerts onto incidents
+Still yours to build: agent worker, MCP servers.
 
   ./down.sh          stop, keep data
   ./down.sh --wipe   stop, delete all volumes

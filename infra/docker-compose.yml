@@ -3,7 +3,8 @@
 # Those run on the host and connect to the published ports below.
 #
 # Total steady-state RAM: ~5.1 GB. Run on 16 GB.
-# Start with ./up.sh (it sets vm.max_map_count, which OpenSearch needs).
+# Start everything with ../dev.sh up, or just this file with ./up.sh (it sets
+# vm.max_map_count, which OpenSearch needs).
 
 name: sre-copilot
 
@@ -111,6 +112,13 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_LOG_RETENTION_HOURS: 168
+      # The broker looks for expired segments every 5 minutes by default.
+      # payment-events keeps only 5 minutes of data, so check every 30s or
+      # expired data would linger for up to twice its retention.
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 30000
+      # Topics come from kafka-init only. An auto-created topic would get
+      # the 168h default above, silently, from one typo in a client config.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_HEAP_OPTS: ${KAFKA_HEAP}
     volumes:
       - kafka-data:/var/lib/kafka/data
@@ -120,20 +128,40 @@ services:
       timeout: 10s
       retries: 30
 
-  # One-shot: create the incidents topic with 3 partitions so you can scale
-  # workers on consumer lag (deep dive 12) rather than CPU.
+  # One-shot: create the topics. Idempotent, and safe to re-run on a live
+  # broker: `docker compose up kafka-init`.
+  #
+  #   incidents       3 partitions, so you can scale workers on consumer lag
+  #                   (deep dive 12) rather than CPU. Default retention.
+  #   payment-events  the simulator's event stream. 6 partitions keyed by
+  #                   customer; keeps 5 minutes of data.
   kafka-init:
     image: apache/kafka:${KAFKA_VERSION}
     depends_on:
       kafka: { condition: service_healthy }
+    environment:
+      RETENTION_MS: ${PAYMENT_EVENTS_RETENTION_MS:-300000}
     entrypoint:
       - /bin/sh
-      - -c
+      - -ec
       - |
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+        K=/opt/kafka/bin
+        $$K/kafka-topics.sh --bootstrap-server kafka:9092 \
           --create --if-not-exists --topic incidents \
           --partitions 3 --replication-factor 1
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+        # Kafka deletes whole closed segments, never part of one, and the
+        # active segment only closes after segment.ms (default 7 days). So
+        # retention.ms alone would keep a week of data. Rolling every minute
+        # lets a 5-minute retention actually delete things.
+        $$K/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic payment-events \
+          --partitions 6 --replication-factor 1
+        # --if-not-exists skips configs on an existing topic, so set them
+        # separately. This also applies a changed RETENTION_MS on re-run.
+        $$K/kafka-configs.sh --bootstrap-server kafka:9092 --alter \
+          --entity-type topics --entity-name payment-events \
+          --add-config retention.ms=$$RETENTION_MS,segment.ms=60000
+        $$K/kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic payment-events
     restart: "no"
 
   # ---------- Dedup state ----------
@@ -181,9 +209,11 @@ services:
       GF_INSTALL_PLUGINS: grafana-opensearch-datasource
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     depends_on:
       prometheus: { condition: service_healthy }
+      alertmanager: { condition: service_healthy }
 
   # Optional: docker compose --profile dashboards up -d
   # Grafana already queries OpenSearch, so this is only for index management.

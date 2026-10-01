@@ -16,3 +16,6 @@ venv/
 # Editor / OS noise
 .DS_Store
 *.swp
+
+# dev.sh pid files and process logs
+.run/

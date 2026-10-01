@@ -1,0 +1,12 @@
+apiVersion: 1
+
+# Dashboards live as JSON in infra/grafana/dashboards and load at startup.
+# Edits made in the UI are discarded on restart: export the JSON and commit
+# it instead.
+providers:
+  - name: signalops
+    folder: SignalOps
+    type: file
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

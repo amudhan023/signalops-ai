@@ -31,3 +31,15 @@ datasources:
       # The OpenSearch exporter leaves @timestamp at the zero time on spans;
       # startTime is the one that actually carries the span's clock.
       timeField: "startTime"
+
+  # Lets Grafana's Alerting pages show what Alertmanager holds: active
+  # alerts, their grouping, and silences. Rules stay in Prometheus
+  # (infra/prometheus/alerts.yml) -- Grafana reads them, it does not own them.
+  - name: Alertmanager
+    type: alertmanager
+    uid: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    jsonData:
+      implementation: prometheus
+      handleGrafanaManagedAlerts: false

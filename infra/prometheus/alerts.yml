@@ -28,3 +28,56 @@ groups:
           severity: critical
         annotations:
           summary: "{{ $labels.service }} database errors: {{ $value }}/s"
+
+  # The event stream the simulator writes to Kafka. These fire on Kafka
+  # trouble, not on the payment-api incident: `docker stop sre-copilot-kafka-1`
+  # trips the first two within ~2 minutes.
+  - name: payment-events
+    rules:
+      # Events the producer gave up on after KAFKA_DELIVERY_TIMEOUT_MS (30s).
+      # Any sustained failure is worth a page: each one is a lost event.
+      - alert: PaymentEventsDeliveryFailing
+        expr: |
+          sum by (tenant, service) (
+            rate(payment_events_delivery_failures_total[2m])
+          ) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is failing to deliver {{ $value | humanize }} events/s to Kafka"
+
+      # The producer blocks when its local queue is full, so a slow or absent
+      # broker shows up here as throughput falling behind the target.
+      - alert: PaymentEventsThroughputLow
+        expr: |
+          sum by (tenant, service) (rate(payment_events_produced_total[2m]))
+            < 0.8 * sum by (tenant, service) (payment_events_target_rate)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} acknowledged only {{ $value | humanize }} events/s, under 80% of target"
+
+      - alert: PaymentEventsDeliveryLatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, tenant, service) (
+              rate(payment_events_delivery_latency_seconds_bucket[5m])
+            )
+          ) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} p99 Kafka ack latency is {{ $value | humanizeDuration }}"
+
+  - name: simulator
+    rules:
+      - alert: SimulatorDown
+        expr: up{job="simulator"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape {{ $labels.service }} at {{ $labels.instance }}"

@@ -15,9 +15,16 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
-  # Your simulator, running on the host outside this stack.
-  # It must label its metrics with `tenant` and `service` — Alertmanager
-  # groups on those two labels and they have to be present on the alert.
+  # The simulator, running on the host outside this stack.
+  # Alertmanager groups on `tenant` and `service`, so every alert needs both.
+  # The simulator labels its own payment_* series. The target labels below
+  # cover the rest -- `up`, process_*, python_gc_* -- so SimulatorDown is
+  # routable too. honor_labels keeps the simulator's own values when both
+  # are set, instead of renaming them to exported_tenant/exported_service.
   - job_name: simulator
+    honor_labels: true
     static_configs:
       - targets: ["host.docker.internal:8000"]
+        labels:
+          tenant: acme
+          service: payment-api

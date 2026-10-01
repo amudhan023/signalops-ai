@@ -2,10 +2,11 @@
 
 A local observability stack that gives an AI incident-response agent something
 real to investigate, plus a fake service that produces a reproducible incident
-on demand.
+on demand. The fake service is also a streaming producer: it writes every
+request it handles to a Kafka topic, at hundreds of events per second.
 
 The repository holds three things: the **infrastructure** (`infra/`), an
-**incident simulator** (`simulator/`), and the **alert receiver**
+**incident simulator** (`simulator/`, a Kafka producer), and the **alert receiver**
 (`receiver/`) that turns a fired alert into an incident on a Kafka topic. The
 agent worker that consumes that topic is not here yet.
 
@@ -30,13 +31,26 @@ simulator; Alertmanager uses it to POST alerts to your receiver.
 
 ```bash
 cp infra/.env.example infra/.env     # then set POSTGRES_PASSWORD
-./infra/up.sh                        # needs sudo once, for vm.max_map_count
-python3 simulator/simulator.py       # separate terminal
-./receiver/run.sh                    # separate terminal, builds its venv once
+./dev.sh up                          # needs sudo once, for vm.max_map_count
 ```
 
-`up.sh` prints every endpoint when it finishes. Stop with `./infra/down.sh`,
-or `./infra/down.sh --wipe` to delete the data volumes too.
+`dev.sh up` starts the containers (through `infra/up.sh`), then the receiver
+and the simulator in the background. It waits for each to answer its health
+check and prints the endpoints. The first run builds two Python venvs, so it
+takes a minute.
+
+| Command | What it does |
+| --- | --- |
+| `./dev.sh up` | start everything; safe to re-run |
+| `./dev.sh status` | containers, host processes, and their health |
+| `./dev.sh logs [simulator\|receiver]` | follow a host process log |
+| `./dev.sh restart` | restart the host processes only, e.g. after editing code |
+| `./dev.sh down` | stop everything, keep data |
+| `./dev.sh down --wipe` | stop everything, delete all container volumes |
+
+Host process pid files and logs live in `.run/` (gitignored). You can still run
+any piece in the foreground instead: `./infra/up.sh`, `./simulator/run.sh`,
+`./receiver/run.sh`.
 
 `infra/.env` is gitignored because it holds a password. `up.sh` stops with a
 clear message if it is missing.
@@ -45,21 +59,133 @@ clear message if it is missing.
 
 | Service | Port | Notes |
 | --- | --- | --- |
-| Grafana | 3000 | anonymous admin, datasources provisioned from code |
+| Simulator | 8000 | host process: metrics, fault controls |
+| Receiver | 8080 | host process: Alertmanager webhook |
+| Grafana | 3000 | anonymous admin, datasources and dashboard provisioned from code |
 | OTLP gRPC / HTTP | 4317 / 4318 | send logs and traces here |
 | Postgres | 5432 | pgvector + pg_trgm, for incident memory |
 | Redis | 6379 | dedup state, nothing persisted |
 | Prometheus | 9090 | 15s scrape, 15d retention |
 | OpenSearch | 9200 | indices `sre-logs`, `sre-traces` |
 | Alertmanager | 9093 | webhooks to host `:8080/alerts` |
-| Kafka | 29092 | topic `incidents`, 3 partitions |
+| Kafka | 29092 | topics `incidents` (3 partitions), `payment-events` (6 partitions, 5-minute retention) |
 | OpenSearch Dashboards | 5601 | opt-in: `docker compose --profile dashboards up -d` |
 
-## Producing an incident
+## The simulator: a streaming payment service
 
-The simulator serves one tenant (`acme`) and one service (`payment-api`) at 20
-requests per second, and emits all four evidence sources an engineer would
-check: metrics, logs, traces, and deployments.
+`simulator/` is a Python package, `payment_stream`. It pretends to be
+`payment-api` for tenant `acme`. It runs one loop, 10 ticks per second, and
+for every simulated request it does four things:
+
+1. Records request metrics for Prometheus to scrape on `:8000/metrics`.
+2. Produces one JSON event to the Kafka topic `payment-events`, keyed by
+   customer id, so one customer's events stay in order on one partition.
+3. For some requests, sends a trace (3 spans) over OTLP to the collector, which
+   writes it to OpenSearch `sre-traces`.
+4. For some requests, sends a log line the same way, into `sre-logs`.
+
+An event looks like this:
+
+```json
+{"schema": "signalops.payment-event.v1", "event_id": "23b998a0-...",
+ "occurred_at_ms": 1790825657930, "tenant": "acme", "service": "payment-api",
+ "trace_id": null,
+ "payment": {"customer_id": "cus_03712", "merchant_id": "mer_010",
+             "amount_minor": 422157, "currency": "USD", "method": "wallet"},
+ "outcome": {"status": "approved", "latency_ms": 82.2, "db_pool_max": 50}}
+```
+
+When the request has a trace, `trace_id` is set and the Kafka record carries a
+W3C `traceparent` header. A consumer can then continue the same trace.
+
+### Which requests get a trace
+
+Every failed request gets one. Healthy requests are sampled at 2%
+(`TRACE_SAMPLE_RATIO`). The workload decides this after it knows the outcome,
+in `Workload.should_trace` (`simulator/payment_stream/workload.py`). Plain
+head sampling would also drop 98% of the timeouts, and an error log whose
+trace was never stored is a dead end for whoever investigates it.
+
+Healthy requests also log an INFO line at 1% (`INFO_LOG_RATIO`). Every timeout
+logs an ERROR line, inside its trace, so the log carries the trace id.
+
+### The topic and its 5-minute retention
+
+`infra/docker-compose.yml` creates `payment-events` with `retention.ms=300000`.
+Kafka only deletes *closed* log segments, and by default a segment closes after
+a week or 1 GB. So the topic also sets `segment.ms=60000`, and the broker checks
+retention every 30 s instead of every 5 minutes. With all three, an event lives
+between 5 and about 6.5 minutes. With `retention.ms` alone, nothing would ever
+be deleted at this volume.
+
+The broker has `auto.create.topics.enable=false`. A typo in `KAFKA_TOPIC` fails
+at startup with a clear message instead of quietly creating a new topic with
+default retention. The simulator checks the topic before it starts.
+
+Change the retention with `PAYMENT_EVENTS_RETENTION_MS` in `infra/.env`, then
+`docker compose -f infra/docker-compose.yml up kafka-init`. The init step is
+safe to re-run: it creates what is missing and re-applies the config.
+
+Watch the stream:
+
+```bash
+docker exec sre-copilot-kafka-1 /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic payment-events --property print.headers=true
+```
+
+### Backpressure and broker outages
+
+The producer uses `acks=all` with idempotence, so a retry never writes a
+duplicate. If the local queue fills (100k events), the loop blocks until Kafka
+catches up and counts each wait in `payment_events_backpressure_total`. If the
+broker stays down longer than `KAFKA_DELIVERY_TIMEOUT_MS` (30 s), the producer
+drops the event and counts it in `payment_events_delivery_failures_total{reason}`.
+
+After an outage the loop does not burst the missed events. A burst would hide
+the outage in the throughput graph.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `EVENTS_PER_SECOND` | `500` | target rate, 1 to 20000 |
+| `KAFKA_BOOTSTRAP` | `localhost:29092` | |
+| `KAFKA_TOPIC` | `payment-events` | must already exist |
+| `KAFKA_DELIVERY_TIMEOUT_MS` | `30000` | give up on an event after this long |
+| `OTLP_HTTP` | `http://localhost:4318` | collector, for traces and logs |
+| `TRACE_SAMPLE_RATIO` | `0.02` | share of *healthy* requests traced |
+| `INFO_LOG_RATIO` | `0.01` | share of healthy, untraced requests logged |
+| `TENANT` / `SERVICE` | `acme` / `payment-api` | labels on every signal |
+| `SIMULATOR_PORT` | `8000` | |
+
+The receiver also reads `KAFKA_TOPIC` (default `incidents`). Do not export it
+in a shell that runs `./dev.sh up`, or both processes get the same topic.
+
+### HTTP endpoints
+
+| Endpoint | What it does |
+| --- | --- |
+| `GET /` | health and current state |
+| `GET /metrics` | Prometheus exposition |
+| `GET /deployments` | change history, the "what changed recently?" evidence |
+| `POST /break` | connection pool 50 -> 10, recorded as deploy `v1.42.0` |
+| `POST /heal` | back to 50, recorded as deploy `v1.42.1` |
+| `POST /rate?eps=N` | change the event rate live |
+
+### Tests
+
+```bash
+./simulator/run.sh test
+```
+
+The tests check the shape of the incident and of the telemetry. Healthy p99
+stays under the 1-second alert threshold, and broken p99 crosses 4 seconds.
+Every error log links to a stored trace. The `traceparent` header matches the
+event's `trace_id`. No attribute key breaks the OpenSearch mapping. Kafka and
+the collector are replaced by in-memory fakes, so the tests need no running
+stack.
+
+## Producing an incident
 
 ```bash
 curl -X POST localhost:8000/break   # connection pool 50 -> 10
@@ -69,8 +195,9 @@ curl -X POST localhost:8000/heal    # back to 50
 `/break` changes one thing, and every signal moves at once:
 
 - p99 latency crosses 4 seconds
-- database timeouts appear in `sre-logs`
-- the `payment -> database` span stretches from ~40 ms to ~3.8 s
+- database timeouts appear in `sre-logs`, each with a trace id
+- the `SELECT payments.transaction` span stretches from ~40 ms to ~3.8 s
+- events on `payment-events` start to carry `"status": "timeout"`
 - a deployment record appears saying `maxPoolSize: 50 -> 10`
 
 Alerts fire about 90 seconds later: the rule waits `for: 1m`, then Alertmanager
@@ -92,18 +219,32 @@ That last point is what makes this useful for testing an agent. The root cause
 is known, so "did the agent get it right?" becomes a repeatable check instead
 of a judgment call.
 
-Endpoints: `GET /metrics`, `GET /deployments`, `GET /` (health and current
-state), `POST /break`, `POST /heal`. Configure with `TENANT`, `SERVICE`,
-`OTLP_HTTP`, `SIMULATOR_PORT`, `RPS`.
+### Alerts
 
-```bash
-python3 simulator/simulator.py --selftest
-```
+| Alert | Fires when |
+| --- | --- |
+| `PaymentAPIHighLatency` | request p99 > 1 s for 1m |
+| `PaymentAPIDatabaseErrors` | database timeouts > 1/s for 1m |
+| `PaymentEventsDeliveryFailing` | any event fails Kafka delivery, for 1m |
+| `PaymentEventsThroughputLow` | acknowledged rate < 80% of target, for 2m |
+| `PaymentEventsDeliveryLatencyHigh` | Kafka ack p99 > 1 s, for 2m |
+| `SimulatorDown` | Prometheus cannot scrape `:8000`, for 1m |
 
-The self-test asserts the shape of the incident: healthy p99 stays under the
-1-second alert threshold, broken p99 crosses 4 seconds, histogram buckets stay
-monotonic, and OTLP ids are the right length. Run it after editing the
-simulator to confirm the demo still demos.
+Try the stream alerts with `docker stop sre-copilot-kafka-1`. Start it again
+with `docker start sre-copilot-kafka-1`.
+
+### Dashboard
+
+Grafana provisions **SignalOps → payment-api — stream and requests** from
+`infra/grafana/dashboards/payment-api.json`
+(<http://localhost:3000/d/payment-api-stream>). It shows throughput against
+target, delivery failures, Kafka ack latency, the producer queue, request
+latency, database timeouts, pool size, and the latest error logs from
+OpenSearch. Firing alerts appear as red annotations.
+
+Edits made in the Grafana UI are lost on restart. Export the JSON and commit
+it instead. Grafana's Alerting pages also read Alertmanager through a
+provisioned datasource.
 
 ## Alert receiver
 
@@ -203,24 +344,26 @@ replica, so any other value leaves every index yellow forever.
 **No attribute key may be a dotted prefix of another.** The OpenSearch exporter
 flattens attributes, so sending both `service` and `service.name` asks the
 index to map one key as a string and an object at once. It rejects that for the
-life of the index. The simulator sends only `service.name`, and the self-test
-guards the rule.
+life of the index. The simulator sends only `service.name`, and the tests
+guard the rule.
 
 **Grafana reads spans with `startTime`, not `@timestamp`.** The exporter leaves
 `@timestamp` at the zero time on spans. See
 `infra/grafana/provisioning/datasources/datasources.yml`.
 
-**There is no index rotation policy, and the stack writes about 1.1 GB per
-day.** Measured on a 10-minute window at the default 20 rps:
+**There is no index rotation policy, and the incident is what fills the disk.**
+Sampling keeps the healthy case small, but every failed request keeps its
+trace. Rates at the default 500 events/s, about 265 bytes per document:
 
-| Index | Docs/sec | Bytes/doc | Growth |
+| State | Spans/sec | Logs/sec | Growth |
 | --- | --- | --- | --- |
-| `sre-traces` | 40.1 | 286 | **0.99 GB/day** |
-| `sre-logs` | 2.8 | 278 | 0.07 GB/day |
+| healthy | ~30 (2% of 500, 3 spans each) | ~15 | ~1 GB/day |
+| `/break`, measured | 329 (~21% of requests time out) | 109 | ~10 GB/day |
 
-Traces dominate because the simulator emits two spans per request, so 20 rps
-becomes 40 documents per second. Add an ISM rollover policy before a long run,
-or wipe the volumes between sessions with `./infra/down.sh --wipe`.
+An hour of incident costs about as much as ten hours of healthy traffic. Add
+an ISM rollover policy before a long run, or wipe the volumes between sessions
+with `./dev.sh down --wipe`. Raising `EVENTS_PER_SECOND` raises these figures
+in proportion.
 
 Re-measure it yourself — take two samples ten minutes apart and multiply the
 document rate by the average document size:
