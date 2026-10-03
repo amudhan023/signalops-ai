@@ -75,9 +75,76 @@ groups:
   - name: simulator
     rules:
       - alert: SimulatorDown
-        expr: up{job="simulator"} == 0
+        expr: up{job=~"simulator|sigops-sim"} == 0
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "Prometheus cannot scrape {{ $labels.service }} at {{ $labels.instance }}"
+
+  # checkout-api, from sigops-sim-service. The Control Plane's Simulate page
+  # breaks it on purpose; each of its five scenarios trips at least one rule.
+  # It sends one batch of requests every 2 minutes, so its counters step once
+  # per batch. Every window is 5m, which always holds two batches -- a 2m
+  # window would drop to 0 between them and the alert would flap. A healthy
+  # batch has no errors at all.
+  - name: checkout-api
+    rules:
+      # One alert per cause, so the incident names what broke:
+      # db_pool_timeout, dns_resolution, upstream_timeout, connection_reset,
+      # tls_certificate_expired.
+      - alert: CheckoutAPIErrors
+        expr: |
+          sum by (tenant, service, error_type) (increase(checkout_api_errors_total[5m]))
+            / on (tenant, service) group_left
+          sum by (tenant, service) (increase(checkout_api_http_requests_total[5m]))
+            > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }}: {{ $value | humanizePercentage }} of requests fail with {{ $labels.error_type }}"
+
+      # Pool waits (5s), upstream timeouts (3s) and GC pauses from the
+      # memory leak all land here.
+      - alert: CheckoutAPIHighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, tenant, service) (
+              rate(checkout_api_http_request_duration_seconds_bucket[5m])
+            )
+          ) > 2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 latency on {{ $labels.service }} is {{ $value | humanizeDuration }}"
+
+      # The memory leak gives no errors until the container dies, so warn on
+      # the climb. 1.2 GiB is 60% of the 2 GiB limit, where the service
+      # itself starts logging "high memory usage".
+      - alert: CheckoutAPIMemoryHigh
+        expr: max by (tenant, service) (checkout_api_process_memory_bytes) > 1.2 * 1024 * 1024 * 1024
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} uses {{ $value | humanize1024 }}B of memory, over 60% of its limit"
+
+      # A restart is one step of the counter; the 15m window keeps the alert
+      # up long enough to be seen.
+      - alert: CheckoutAPIOOMKilled
+        expr: sum by (tenant, service) (increase(checkout_api_container_restarts_total[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} was OOMKilled and restarted"
+
+      - alert: CheckoutAPICertificateExpired
+        # Negated, so $value is the time since expiry.
+        expr: -min by (tenant, service, upstream) (checkout_api_tls_certificate_expiry_seconds) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The TLS certificate of {{ $labels.upstream }} expired {{ $value | humanizeDuration }} ago"

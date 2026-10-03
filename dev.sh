@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the whole SignalOps stack on this machine: the containers in infra/
-# plus the host processes (simulator, receiver).
+# plus the host processes (simulator, receiver, sigops-sim).
 #
 #   ./dev.sh up             start everything (idempotent)
 #   ./dev.sh down [--wipe]  stop everything; --wipe also deletes container data
@@ -23,6 +23,16 @@ SERVICES=(
   "receiver|$ROOT/receiver/run.sh|http://localhost:8080/healthz|receiver/run.sh,receiver\.py"
   "simulator|$ROOT/simulator/run.sh|http://localhost:8000/|simulator/run.sh,payment_stream"
 )
+# sigops-sim (checkout-api, driven by the Control Plane's Simulate page) lives
+# in its own repo. Clone it next to this one, or point SIGOPS_SIM_DIR at it;
+# without it the stack still runs and dev.sh says what it skipped.
+SIGOPS_SIM_DIR=${SIGOPS_SIM_DIR:-$ROOT/../sigops-sim-service}
+if [ -x "$SIGOPS_SIM_DIR/run.sh" ]; then
+  SIGOPS_SIM_DIR=$(cd "$SIGOPS_SIM_DIR" && pwd)
+  SERVICES+=("sigops-sim|$SIGOPS_SIM_DIR/run.sh|http://localhost:8200/|sigops-sim-service/run.sh,sim_service")
+else
+  echo "Note: no sigops-sim-service at $SIGOPS_SIM_DIR; skipping sigops-sim." >&2
+fi
 # The first start builds a venv and pip-installs, which can take a minute.
 START_TIMEOUT=180
 STOP_TIMEOUT=20   # the simulator spends up to 10s flushing Kafka on SIGTERM
@@ -140,6 +150,7 @@ Everything is up.
   Change event rate:    curl -X POST 'localhost:8000/rate?eps=2000'
   Watch the stream:     docker exec sre-copilot-kafka-1 /opt/kafka/bin/kafka-console-consumer.sh \
                           --bootstrap-server localhost:9092 --topic payment-events
+  checkout-api incidents (sigops-sim, :8200): use the Control Plane's Simulate page
 EOF
     ;;
   down)

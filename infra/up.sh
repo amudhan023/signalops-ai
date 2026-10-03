@@ -63,6 +63,7 @@ Infrastructure up. Connect your apps to:
 Host processes (start them all with ../dev.sh up, or one at a time):
   simulator  ../simulator/run.sh   :8000  streams to payment-events
   receiver   ../receiver/run.sh    :8080  files alerts onto incidents
+  sigops-sim ../../sigops-sim-service/run.sh  :8200  checkout-api, for the Simulate page
 Still yours to build: agent worker, MCP servers.
 
   ./down.sh          stop, keep data

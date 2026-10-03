@@ -34,8 +34,8 @@ cp infra/.env.example infra/.env     # then set POSTGRES_PASSWORD
 ./dev.sh up                          # needs sudo once, for vm.max_map_count
 ```
 
-`dev.sh up` starts the containers (through `infra/up.sh`), then the receiver
-and the simulator in the background. It waits for each to answer its health
+`dev.sh up` starts the containers (through `infra/up.sh`), then the receiver,
+the simulator and sigops-sim in the background. It waits for each to answer its health
 check and prints the endpoints. The first run builds two Python venvs, so it
 takes a minute.
 
@@ -43,7 +43,7 @@ takes a minute.
 | --- | --- |
 | `./dev.sh up` | start everything; safe to re-run |
 | `./dev.sh status` | containers, host processes, and their health |
-| `./dev.sh logs [simulator\|receiver]` | follow a host process log |
+| `./dev.sh logs [simulator\|receiver\|sigops-sim]` | follow a host process log |
 | `./dev.sh restart` | restart the host processes only, e.g. after editing code |
 | `./dev.sh down` | stop everything, keep data |
 | `./dev.sh down --wipe` | stop everything, delete all container volumes |
@@ -51,6 +51,11 @@ takes a minute.
 Host process pid files and logs live in `.run/` (gitignored). You can still run
 any piece in the foreground instead: `./infra/up.sh`, `./simulator/run.sh`,
 `./receiver/run.sh`.
+
+**sigops-sim** is the checkout-api simulator behind the Control Plane's Simulate
+page ([sigops-sim-service](https://github.com/amudhan023/sigops-sim-service),
+port 8200). It lives in its own repo: `dev.sh` looks for it next to this one,
+or wherever `SIGOPS_SIM_DIR` points, and skips it with a note if it is missing.
 
 `infra/.env` is gitignored because it holds a password. `up.sh` stops with a
 clear message if it is missing.
@@ -228,7 +233,12 @@ of a judgment call.
 | `PaymentEventsDeliveryFailing` | any event fails Kafka delivery, for 1m |
 | `PaymentEventsThroughputLow` | acknowledged rate < 80% of target, for 2m |
 | `PaymentEventsDeliveryLatencyHigh` | Kafka ack p99 > 1 s, for 2m |
-| `SimulatorDown` | Prometheus cannot scrape `:8000`, for 1m |
+| `SimulatorDown` | Prometheus cannot scrape `:8000` or sigops-sim on `:8200`, for 1m |
+| `CheckoutAPIErrors` | one error type is > 5% of checkout-api requests over 5m, for 2m (one alert per `error_type`) |
+| `CheckoutAPIHighLatency` | checkout-api request p99 > 2 s, for 2m |
+| `CheckoutAPIMemoryHigh` | checkout-api memory > 1.2 GiB (60% of its limit), for 1m |
+| `CheckoutAPIOOMKilled` | checkout-api restarted after an OOMKill in the last 15m |
+| `CheckoutAPICertificateExpired` | the payments-gateway certificate has expired, for 1m |
 
 Try the stream alerts with `docker stop sre-copilot-kafka-1`. Start it again
 with `docker start sre-copilot-kafka-1`.

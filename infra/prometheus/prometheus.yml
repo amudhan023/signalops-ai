@@ -28,3 +28,13 @@ scrape_configs:
         labels:
           tenant: acme
           service: payment-api
+
+  # sigops-sim-service (checkout-api), started from the Control Plane's
+  # Simulate page. Same label rules as the simulator job above.
+  - job_name: sigops-sim
+    honor_labels: true
+    static_configs:
+      - targets: ["host.docker.internal:8200"]
+        labels:
+          tenant: acme
+          service: checkout-api
