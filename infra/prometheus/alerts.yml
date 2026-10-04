@@ -104,6 +104,8 @@ groups:
           severity: critical
         annotations:
           summary: "{{ $labels.service }}: {{ $value | humanizePercentage }} of requests fail with {{ $labels.error_type }}"
+          # The agent reads the service's recent commits from this repository.
+          repository: amudhan023/sigops-sim-service
 
       # Pool waits (5s), upstream timeouts (3s) and GC pauses from the
       # memory leak all land here.
@@ -119,6 +121,8 @@ groups:
           severity: warning
         annotations:
           summary: "p99 latency on {{ $labels.service }} is {{ $value | humanizeDuration }}"
+          # The agent reads the service's recent commits from this repository.
+          repository: amudhan023/sigops-sim-service
 
       # The memory leak gives no errors until the container dies, so warn on
       # the climb. 1.2 GiB is 60% of the 2 GiB limit, where the service
@@ -130,6 +134,8 @@ groups:
           severity: warning
         annotations:
           summary: "{{ $labels.service }} uses {{ $value | humanize1024 }}B of memory, over 60% of its limit"
+          # The agent reads the service's recent commits from this repository.
+          repository: amudhan023/sigops-sim-service
 
       # A restart is one step of the counter; the 15m window keeps the alert
       # up long enough to be seen.
@@ -139,6 +145,8 @@ groups:
           severity: critical
         annotations:
           summary: "{{ $labels.service }} was OOMKilled and restarted"
+          # The agent reads the service's recent commits from this repository.
+          repository: amudhan023/sigops-sim-service
 
       - alert: CheckoutAPICertificateExpired
         # Negated, so $value is the time since expiry.
@@ -148,3 +156,5 @@ groups:
           severity: critical
         annotations:
           summary: "The TLS certificate of {{ $labels.upstream }} expired {{ $value | humanizeDuration }} ago"
+          # The agent reads the service's recent commits from this repository.
+          repository: amudhan023/sigops-sim-service
